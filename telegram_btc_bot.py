@@ -7,19 +7,13 @@ from datetime import datetime
 if sys.platform == 'win32':
     import os
     os.environ['PYTHONIOENCODING'] = 'utf-8'
-    try:
-        import io
-        if hasattr(sys.stdout, 'buffer'):
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-        if hasattr(sys.stderr, 'buffer'):
-            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
-    except:
-        pass
+    # Don't wrap stdout/stderr to avoid I/O errors
+    # The environment variable should be enough
 
 # Telegram Bot Configuration
 BOT_TOKEN = "8388090013:AAF0oRF7fJepJIl6BZnJn4CRktH54Fh0Srg"
-CHANNEL_ID = "-1003340831672"  # Channel ID (can also use "@cryptopricebd")
-CHANNEL_USERNAME = "@cryptopricebd"
+# Channels list - can add multiple channels via /addchannel command
+CHANNELS = ["@cryptopricebd1"]  # List of channel usernames/IDs
 
 # Admin Configuration - Add your Telegram User ID here
 # To get your User ID, message @userinfobot on Telegram
@@ -56,11 +50,19 @@ def get_bot_info():
         print(f"[ERROR] Error getting bot info: {e}")
         return None
 
-def get_channel_info():
+def get_channel_info(channel=None):
     """Get channel information"""
+    import telegram_btc_bot as bot_module
+    if not channel:
+        channels = bot_module.CHANNELS
+        if channels:
+            channel = channels[0]  # Get first channel
+        else:
+            return None
+    
     try:
         url = f"{TELEGRAM_API}/getChat"
-        payload = {"chat_id": CHANNEL_ID}
+        payload = {"chat_id": channel}
         response = requests.post(url, json=payload, timeout=10)
         result = response.json()
         if result.get("ok"):
@@ -70,16 +72,22 @@ def get_channel_info():
         print(f"[ERROR] Error getting channel info: {e}")
         return None
 
-def get_bot_member_status():
+def get_bot_member_status(channel=None):
     """Get bot's member status in channel"""
     bot_info = get_bot_info()
     if not bot_info:
         return None
     
+    if not channel:
+        if CHANNELS:
+            channel = CHANNELS[0]  # Get first channel
+        else:
+            return None
+    
     try:
         url = f"{TELEGRAM_API}/getChatMember"
         payload = {
-            "chat_id": CHANNEL_ID,
+            "chat_id": channel,
             "user_id": bot_info["id"]
         }
         response = requests.post(url, json=payload, timeout=10)
@@ -194,123 +202,137 @@ def send_message_to_user(user_id, message, parse_mode="HTML"):
         return False
 
 def send_message_to_channel(message):
-    """Send message to Telegram channel"""
-    # Try both channel ID and username
-    channel_ids = [CHANNEL_ID]
-    if CHANNEL_ID.startswith("-"):
-        channel_ids.append(CHANNEL_USERNAME)
-    elif CHANNEL_ID.startswith("@"):
-        channel_ids.append("-1003340831672")
+    """Send message to all channels in the list"""
+    channels = CHANNELS.copy()
     
-    for chat_id in channel_ids:
-        try:
-            url = f"{TELEGRAM_API}/sendMessage"
-            payload = {
-                "chat_id": chat_id,
-                "text": message,
-                "parse_mode": "HTML"
-            }
-            response = requests.post(url, json=payload, timeout=10)
-            result = response.json()
-            
-            if result.get("ok"):
-                msg_id = result["result"].get("message_id", "N/A")
-                print(f"[SUCCESS] Message sent (ID: {msg_id}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                sys.stdout.flush()
-                return True
-            else:
-                error_code = result.get("error_code", "Unknown")
-                error_desc = result.get("description", "Unknown error")
+    if not channels:
+        print("[ERROR] No channels configured!")
+        return False
+    
+    success_count = 0
+    failed_channels = []
+    
+    for channel in channels:
+        sent = False
+        for chat_id in [channel]:
+            try:
+                url = f"{TELEGRAM_API}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": message,
+                    "parse_mode": "HTML"
+                }
+                response = requests.post(url, json=payload, timeout=10)
+                result = response.json()
                 
-                # Only show error if this is the last attempt
-                if chat_id == channel_ids[-1]:
-                    print(f"[ERROR] Error sending message: {error_code} - {error_desc}")
+                if result.get("ok"):
+                    msg_id = result["result"].get("message_id", "N/A")
+                    print(f"[SUCCESS] Message sent to {channel} (ID: {msg_id}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     sys.stdout.flush()
+                    success_count += 1
+                    sent = True
+                    break
+                else:
+                    error_code = result.get("error_code", "Unknown")
+                    error_desc = result.get("description", "Unknown error")
                     
-                    if error_code == 403:
-                        print()
-                        print("=" * 60)
-                        print("IMPORTANT: Bot cannot post to channel!")
-                        print("=" * 60)
-                        print()
-                        print("SOLUTION:")
-                        print("1. Open Telegram channel: https://t.me/cryptopricebd")
-                        print("2. Click channel name -> Subscribers/Members")
-                        print("3. Click 'Add Subscribers'")
-                        bot_info = get_bot_info()
-                        if bot_info:
-                            print(f"4. Search for: @{bot_info.get('username', 'cryptoprice123_bot')}")
-                        else:
-                            print("4. Search for: @cryptoprice123_bot")
-                        print("5. Add the bot as subscriber")
-                        print()
-                        print("Then verify admin permissions:")
-                        print("1. Click channel name -> Administrators")
-                        print("2. Find 'crypto price' bot")
-                        print("3. Make sure 'Post Messages' is enabled")
-                        print("4. Click Save")
-                        print()
-                        print("=" * 60)
+                    if chat_id == channel_ids[-1]:
+                        print(f"[ERROR] Failed to send to {channel}: {error_code} - {error_desc}")
                         sys.stdout.flush()
-                
-                # Try next chat_id format
+                        failed_channels.append(f"{channel} ({error_desc})")
+                    
+                    continue
+                    
+            except Exception as e:
+                if chat_id == channel_ids[-1]:
+                    print(f"[ERROR] Error sending to {channel}: {e}")
+                    sys.stdout.flush()
+                    failed_channels.append(f"{channel} (Error: {e})")
                 continue
-                
-        except Exception as e:
-            if chat_id == channel_ids[-1]:
-                print(f"[ERROR] Error sending message: {e}")
-                sys.stdout.flush()
-            continue
+        
+        if not sent:
+            failed_channels.append(channel)
     
-    return False
+    # Summary
+    if success_count > 0:
+        print(f"[INFO] Successfully sent to {success_count}/{len(channels)} channel(s)")
+        if failed_channels:
+            print(f"[WARNING] Failed channels: {', '.join(failed_channels)}")
+        sys.stdout.flush()
+        return True
+    else:
+        print(f"[ERROR] Failed to send to all channels!")
+        sys.stdout.flush()
+        return False
 
 def format_price_message(price, change_24h):
     """Format the price message with emoji and formatting"""
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    current_time_display = datetime.now().strftime("%I:%M %p")
     
-    # Determine emoji based on 24h change
+    # Determine emoji and color based on 24h change
     if change_24h and change_24h > 0:
         trend_emoji = "📈"
         change_text = f"+{change_24h:.2f}%"
+        change_color = "🟢"  # Green for positive
     elif change_24h and change_24h < 0:
         trend_emoji = "📉"
         change_text = f"{change_24h:.2f}%"
+        change_color = "🔴"  # Red for negative
     else:
         trend_emoji = "➡️"
         change_text = "N/A"
+        change_color = "⚪"
+    
+    # Format price with better spacing
+    price_formatted = f"${price:,.2f}"
     
     message = f"""
-🪙 <b>Bitcoin (BTC) Price</b>
+━━━━━━━━━━━━━━━━━━━━
+<b>₿ BITCOIN (BTC) PRICE</b>
+━━━━━━━━━━━━━━━━━━━━
 
-💰 <b>Price:</b> ${price:,.2f}
-{trend_emoji} <b>24h Change:</b> {change_text}
+<b>💰 Current Price:</b>
+<code>{price_formatted}</code>
 
-⏰ <b>Time:</b> {current_time}
+<b>{trend_emoji} 24h Change:</b>
+<code>{change_color} {change_text}</code>
 
-#BTC #Bitcoin #CryptoPrice
+<b>🕐 Updated:</b> {current_time}
+<b>⏰ Time:</b> {current_time_display}
+
+━━━━━━━━━━━━━━━━━━━━
+<b>#BTC</b> <b>#Bitcoin</b> <b>#CryptoPrice</b>
+━━━━━━━━━━━━━━━━━━━━
 """
     return message.strip()
 
 def test_bot_access():
-    """Test if bot can access the channel"""
-    try:
-        url = f"{TELEGRAM_API}/getChat"
-        payload = {"chat_id": CHANNEL_ID}
-        response = requests.post(url, json=payload, timeout=10)
-        result = response.json()
-        
-        if result.get("ok"):
-            print(f"[OK] Bot can access channel: {CHANNEL_ID}")
-            sys.stdout.flush()
-            return True
-        else:
-            print(f"[ERROR] Bot cannot access channel: {result.get('description')}")
-            sys.stdout.flush()
-            return False
-    except Exception as e:
-        print(f"[ERROR] Error testing access: {e}")
-        sys.stdout.flush()
+    """Test if bot can access all channels"""
+    channels = CHANNELS.copy()
+    
+    if not channels:
+        print("[WARNING] No channels configured!")
         return False
+    
+    accessible = 0
+    for channel in channels:
+        try:
+            url = f"{TELEGRAM_API}/getChat"
+            payload = {"chat_id": channel}
+            response = requests.post(url, json=payload, timeout=10)
+            result = response.json()
+            
+            if result.get("ok"):
+                print(f"[OK] Bot can access channel: {channel}")
+                accessible += 1
+            else:
+                print(f"[ERROR] Bot cannot access channel {channel}: {result.get('description')}")
+        except Exception as e:
+            print(f"[ERROR] Error testing access to {channel}: {e}")
+    
+    sys.stdout.flush()
+    return accessible > 0
 
 def get_updates():
     """Get updates from Telegram bot"""
@@ -368,45 +390,114 @@ def handle_command(update):
     
     # Handle commands
     if command == "/start":
+        channels_list = "\n".join([f"  • {ch}" for ch in CHANNELS]) if CHANNELS else "  No channels"
+        minutes = post_interval // 60
+        seconds = post_interval % 60
+        interval_display = f"{minutes} min {seconds} sec" if seconds > 0 else f"{minutes} minute(s)"
+        
         help_text = f"""
-🤖 <b>BTC Price Bot - Admin Panel</b>
+🤖 <b>BTC PRICE BOT - ADMIN PANEL</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-<b>Available Commands:</b>
+<b>📋 ALL COMMANDS:</b>
 
+<b>Bot Control:</b>
 /start - Show this help message
-/status - Check bot status
-/price - Get current BTC price
-/test - Send test message to channel
-/stop - Stop posting prices
+/stop - Stop posting prices (bot continues running)
 /startpost - Resume posting prices
-/interval - Set posting interval (minutes or seconds)
-/current - Show current settings
+/status - Check bot and channel status
+/current - Show current bot settings
+
+<b>Price & Testing:</b>
+/price - Get current BTC price
+/test - Send test message to all channels
+
+<b>Channel Management:</b>
+/addchannel @name - Add a channel
+  Example: /addchannel @cryptopricebd1
+/removechannel @name - Remove a channel
+  Example: /removechannel @cryptopricebd1
+/channels - List all channels
+
+<b>Settings:</b>
+/interval 5m - Set posting interval (minutes)
+  Example: /interval 5m (5 minutes)
+/interval 30s - Set posting interval (seconds)
+  Example: /interval 30s (30 seconds)
+/interval - Show current interval
+
+<b>Information:</b>
 /info - Get bot information
-/getmyid - Get your User ID
-/help - Show help
+/getmyid - Get your User ID (to add as admin)
+/help - Show help message
 
-<b>Current Settings:</b>
-Posting Interval: {post_interval // 60} minute(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>⚙️ CURRENT SETTINGS:</b>
+
+Posting Interval: {interval_display} ({post_interval} seconds)
 Bot Status: {'Running ✅' if bot_running else 'Stopped ⏸️'}
+Channels ({len(CHANNELS)}):
+{channels_list}
 
-<b>Note:</b> Use /getmyid to get your User ID, then add it to ADMIN_USER_IDS in the script.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>💡 TIPS:</b>
+• Use /getmyid to get your User ID
+• Add your User ID to ADMIN_USER_IDS in the script
+• Bot posts to all channels simultaneously
+• Minimum interval: 10 seconds
+• Maximum interval: 24 hours
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
         send_message_to_user(chat_id, help_text)
         
     elif command == "/help":
+        minutes = post_interval // 60
+        seconds = post_interval % 60
+        interval_display = f"{minutes} min {seconds} sec" if seconds > 0 else f"{minutes} minute(s)"
+        
         help_text = f"""
-📋 <b>Admin Commands:</b>
+📋 <b>BTC PRICE BOT - COMMAND LIST</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/status - Check bot and channel status
-/price - Get current BTC price
-/test - Send test message to channel
-/stop - Pause price posting
-/startpost - Resume price posting
-/interval - Set posting interval (e.g., /interval 5m or /interval 30s)
+<b>🤖 Bot Control:</b>
+/start - Show full help menu
+/stop - Stop posting prices
+/startpost - Resume posting prices
+/status - Check bot status
 /current - Show current settings
-/info - Get bot information
 
-<b>Current Interval:</b> {post_interval // 60} min {post_interval % 60} sec ({post_interval}s)
+<b>💰 Price & Testing:</b>
+/price - Get current BTC price
+/test - Send test message to all channels
+
+<b>📢 Channel Management:</b>
+/addchannel @name - Add a channel
+  Example: /addchannel @cryptopricebd1
+/removechannel @name - Remove a channel
+  Example: /removechannel @cryptopricebd1
+/channels - List all channels
+
+<b>⏱️ Interval Settings:</b>
+/interval 5m - Set to 5 minutes
+/interval 30s - Set to 30 seconds
+/interval 90s - Set to 90 seconds
+/interval - Show current interval
+
+<b>ℹ️ Information:</b>
+/info - Bot information
+/getmyid - Get your User ID
+/help - Show this help
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+<b>Current Interval:</b> {interval_display} ({post_interval}s)
+<b>Channels:</b> {len(CHANNELS)} channel(s)
+<b>Bot Status:</b> {'Running ✅' if bot_running else 'Stopped ⏸️'}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
         send_message_to_user(chat_id, help_text)
         
@@ -421,9 +512,8 @@ Bot Status: {'Running ✅' if bot_running else 'Stopped ⏸️'}
             status_text += f"Bot: @{bot_info.get('username', 'Unknown')}\n"
             status_text += f"Name: {bot_info.get('first_name', 'Unknown')}\n\n"
         
-        if channel_info:
-            status_text += f"Channel: {channel_info.get('title', 'Unknown')}\n"
-            status_text += f"Channel ID: {channel_info.get('id', 'Unknown')}\n\n"
+        channels_list = ", ".join(CHANNELS) if CHANNELS else "No channels"
+        status_text += f"Channels ({len(CHANNELS)}): {channels_list}\n\n"
         
         if member_status:
             status = member_status.get("status", "unknown")
@@ -548,17 +638,89 @@ If you see this message, the bot is working correctly!
             
             send_message_to_user(chat_id, f"📊 <b>Current Interval:</b> {interval_display}\n\n<b>To change:</b>\n/interval 5 - 5 minutes\n/interval 5m - 5 minutes\n/interval 30s - 30 seconds\n/interval 90s - 90 seconds")
             
+    elif command == "/addchannel":
+        # Add channel: /addchannel @channelname
+        parts = text.split()
+        if len(parts) > 1:
+            new_channel = parts[1].strip()
+            
+            # Validate channel format
+            if not (new_channel.startswith("@") or new_channel.startswith("-")):
+                send_message_to_user(chat_id, "❌ Invalid channel format.\n\nUse: /addchannel @channelname\nExample: /addchannel @cryptopricebd1")
+                return
+            
+            import telegram_btc_bot as bot_module
+            channels = bot_module.CHANNELS.copy()
+            
+            # Check if already exists
+            if new_channel in channels:
+                send_message_to_user(chat_id, f"⚠️ Channel {new_channel} is already in the list!")
+                return
+            
+            # Test if bot can access the channel
+            try:
+                url = f"{TELEGRAM_API}/getChat"
+                payload = {"chat_id": new_channel}
+                response = requests.post(url, json=payload, timeout=10)
+                result = response.json()
+                
+                if result.get("ok"):
+                    # Add channel
+                    bot_module.CHANNELS.append(new_channel)
+                    channel_info = result["result"]
+                    channel_title = channel_info.get("title", "Unknown")
+                    
+                    channels_list = "\n".join([f"• {ch}" for ch in bot_module.CHANNELS])
+                    send_message_to_user(chat_id, f"✅ Channel added successfully!\n\n<b>New Channel:</b> {new_channel}\n<b>Title:</b> {channel_title}\n\n<b>All Channels ({len(bot_module.CHANNELS)}):</b>\n{channels_list}")
+                else:
+                    error_desc = result.get("description", "Unknown error")
+                    send_message_to_user(chat_id, f"❌ Cannot access channel: {error_desc}\n\nPlease make sure:\n1. Bot is added to the channel\n2. Bot is an administrator\n3. Channel username is correct")
+            except Exception as e:
+                send_message_to_user(chat_id, f"❌ Error adding channel: {e}\n\nPlease check the channel username and try again.")
+        else:
+            import telegram_btc_bot as bot_module
+            channels_list = "\n".join([f"• {ch}" for ch in bot_module.CHANNELS]) if bot_module.CHANNELS else "No channels"
+            send_message_to_user(chat_id, f"📊 <b>Current Channels ({len(bot_module.CHANNELS)}):</b>\n{channels_list}\n\n<b>To add:</b>\n/addchannel @channelname\nExample: /addchannel @cryptopricebd1")
+            
+    elif command == "/removechannel":
+        # Remove channel: /removechannel @channelname
+        parts = text.split()
+        if len(parts) > 1:
+            channel_to_remove = parts[1].strip()
+            
+            import telegram_btc_bot as bot_module
+            if channel_to_remove in bot_module.CHANNELS:
+                bot_module.CHANNELS.remove(channel_to_remove)
+                channels_list = "\n".join([f"• {ch}" for ch in bot_module.CHANNELS]) if bot_module.CHANNELS else "No channels"
+                send_message_to_user(chat_id, f"✅ Channel removed!\n\n<b>Remaining Channels ({len(bot_module.CHANNELS)}):</b>\n{channels_list}")
+            else:
+                send_message_to_user(chat_id, f"❌ Channel {channel_to_remove} not found in the list!")
+        else:
+            import telegram_btc_bot as bot_module
+            channels_list = "\n".join([f"• {ch}" for ch in bot_module.CHANNELS]) if bot_module.CHANNELS else "No channels"
+            send_message_to_user(chat_id, f"📊 <b>Current Channels ({len(bot_module.CHANNELS)}):</b>\n{channels_list}\n\n<b>To remove:</b>\n/removechannel @channelname")
+            
+    elif command == "/channels":
+        # List all channels
+        channels_list = "\n".join([f"• {ch}" for ch in CHANNELS]) if CHANNELS else "No channels configured"
+        send_message_to_user(chat_id, f"📊 <b>All Channels ({len(CHANNELS)}):</b>\n{channels_list}\n\n<b>Commands:</b>\n/addchannel @name - Add channel\n/removechannel @name - Remove channel")
+            
     elif command == "/current":
+        channels_list = "\n".join([f"• {ch}" for ch in CHANNELS]) if CHANNELS else "No channels"
         status_text = f"""
 ⚙️ <b>Current Bot Settings</b>
 
 Posting Interval: {post_interval // 60} minute(s) ({post_interval} seconds)
 Bot Status: {'Running ✅' if bot_running else 'Stopped ⏸️'}
-Channel: {CHANNEL_USERNAME}
+Channels ({len(CHANNELS)}):
+{channels_list}
 
 <b>Commands:</b>
 /interval 5m - Set interval to 5 minutes
 /interval 30s - Set interval to 30 seconds
+/addchannel @name - Add channel
+/removechannel @name - Remove channel
+/channels - List all channels
 /stop - Stop posting
 /startpost - Resume posting
 """
@@ -610,7 +772,9 @@ def run_bot():
     print("=" * 50, flush=True)
     print("", flush=True)
     
-    print(f"Channel: {CHANNEL_ID}")
+    print(f"Channels: {len(CHANNELS)} channel(s)")
+    for ch in CHANNELS:
+        print(f"  • {ch}")
     minutes = post_interval // 60
     seconds = post_interval % 60
     if seconds > 0:
@@ -633,7 +797,7 @@ def run_bot():
         print("Please ensure:")
         print("1. Bot is added to channel as administrator")
         print("2. Bot has 'Post Messages' permission enabled")
-        print("3. Channel username is correct: @cryptopricebd")
+        print("3. Check all channels are correct")
         print()
         print("Continuing anyway...")
         print()
