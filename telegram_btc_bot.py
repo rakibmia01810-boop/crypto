@@ -18,16 +18,18 @@ CHANNELS = ["@cryptopricebd1"]  # List of channel usernames/IDs
 # Admin Configuration - Add your Telegram User ID here
 # To get your User ID, message @userinfobot on Telegram
 # Or use /getmyid command when bot is running
-ADMIN_USER_IDS = [7127437250]  # Admin user IDs
+ADMIN_USER_IDS = [7127437250, 6393419765]  # Admin user IDs
 
 # API endpoints
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 COINGECKO_API = "https://api.coingecko.com/api/v3/simple/price"
+COINGECKO_TRENDING_API = "https://api.coingecko.com/api/v3/coins/markets"
 
 # Global variables for bot control
 bot_running = True
 last_update_id = 0
 post_interval = 60  # Default: 60 seconds (1 minute)
+crypto_count = 25  # Default: 25 cryptocurrencies
 last_successful_price = None  # Cache last successful price
 last_successful_change = None
 api_fail_count = 0  # Track consecutive API failures
@@ -103,6 +105,58 @@ def get_bot_member_status(channel=None):
 # BTC Price Bot Functions
 # ============================================================================
 
+def get_top_crypto_prices(limit=25, retry_count=0):
+    """Fetch top cryptocurrency prices from CoinGecko API"""
+    global api_fail_count
+    
+    try:
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": limit,
+            "page": 1,
+            "sparkline": False,
+            "price_change_percentage": "24h"
+        }
+        response = requests.get(COINGECKO_TRENDING_API, params=params, timeout=20)
+        data = response.json()
+        
+        if isinstance(data, list) and len(data) > 0:
+            api_fail_count = 0
+            return data
+        
+        if retry_count < MAX_API_RETRIES:
+            time.sleep(2)
+            return get_top_crypto_prices(limit, retry_count + 1)
+        
+        return None
+        
+    except requests.exceptions.Timeout:
+        api_fail_count += 1
+        print(f"[WARNING] API timeout (attempt {retry_count + 1}/{MAX_API_RETRIES})")
+        
+        if retry_count < MAX_API_RETRIES:
+            wait_time = (retry_count + 1) * 2
+            time.sleep(wait_time)
+            return get_top_crypto_prices(limit, retry_count + 1)
+        
+        return None
+        
+    except requests.exceptions.RequestException as e:
+        api_fail_count += 1
+        print(f"[WARNING] API request error: {type(e).__name__} (attempt {retry_count + 1}/{MAX_API_RETRIES})")
+        
+        if retry_count < MAX_API_RETRIES:
+            time.sleep(2)
+            return get_top_crypto_prices(limit, retry_count + 1)
+        
+        return None
+        
+    except Exception as e:
+        api_fail_count += 1
+        print(f"[ERROR] Unexpected error fetching crypto prices: {type(e).__name__}: {e}")
+        return None
+
 def get_btc_price(retry_count=0):
     """Fetch BTC price from CoinGecko API with retry logic"""
     global last_successful_price, last_successful_change, api_fail_count
@@ -113,7 +167,6 @@ def get_btc_price(retry_count=0):
             "vs_currencies": "usd",
             "include_24hr_change": "true"
         }
-        # Increase timeout for better reliability
         response = requests.get(COINGECKO_API, params=params, timeout=15)
         data = response.json()
         
@@ -122,20 +175,16 @@ def get_btc_price(retry_count=0):
             price = btc_data.get("usd", 0)
             change_24h = btc_data.get("usd_24h_change", 0)
             
-            # Validate price data
             if price and price > 0:
-                # Update cache on success
                 last_successful_price = price
                 last_successful_change = change_24h
                 api_fail_count = 0
                 return price, change_24h
         
-        # If we get here, data is invalid
         if retry_count < MAX_API_RETRIES:
-            time.sleep(2)  # Wait 2 seconds before retry
+            time.sleep(2)
             return get_btc_price(retry_count + 1)
         
-        # Return cached price if available
         if last_successful_price:
             print(f"[INFO] Using cached price (API failed)")
             return last_successful_price, last_successful_change
@@ -147,12 +196,10 @@ def get_btc_price(retry_count=0):
         print(f"[WARNING] API timeout (attempt {retry_count + 1}/{MAX_API_RETRIES})")
         
         if retry_count < MAX_API_RETRIES:
-            # Exponential backoff: wait longer on each retry
             wait_time = (retry_count + 1) * 2
             time.sleep(wait_time)
             return get_btc_price(retry_count + 1)
         
-        # Return cached price if available
         if last_successful_price:
             print(f"[INFO] Using cached price (API timeout)")
             return last_successful_price, last_successful_change
@@ -167,7 +214,6 @@ def get_btc_price(retry_count=0):
             time.sleep(2)
             return get_btc_price(retry_count + 1)
         
-        # Return cached price if available
         if last_successful_price:
             print(f"[INFO] Using cached price (API error)")
             return last_successful_price, last_successful_change
@@ -178,7 +224,6 @@ def get_btc_price(retry_count=0):
         api_fail_count += 1
         print(f"[ERROR] Unexpected error fetching BTC price: {type(e).__name__}: {e}")
         
-        # Return cached price if available
         if last_successful_price:
             print(f"[INFO] Using cached price (error occurred)")
             return last_successful_price, last_successful_change
@@ -201,25 +246,74 @@ def send_message_to_user(user_id, message, parse_mode="HTML"):
         print(f"[ERROR] Error sending message to user: {e}")
         return False
 
+def split_message(message, max_length=4000):
+    """Split message into chunks if it exceeds Telegram's limit (4096 chars)"""
+    if len(message) <= max_length:
+        return [message]
+    
+    messages = []
+    lines = message.split('\n')
+    current_message = ""
+    
+    for line in lines:
+        # Check if adding this line would exceed limit
+        test_message = current_message + line + '\n' if current_message else line + '\n'
+        
+        if len(test_message) > max_length:
+            # If current message has content, save it
+            if current_message:
+                messages.append(current_message.strip())
+                current_message = ""
+            
+            # If single line is too long, truncate it
+            if len(line) > max_length:
+                # Try to split by words
+                words = line.split()
+                for word in words:
+                    test_word = current_message + word + ' ' if current_message else word + ' '
+                    if len(test_word) > max_length:
+                        if current_message:
+                            messages.append(current_message.strip())
+                            current_message = word + ' '
+                        else:
+                            # Word itself is too long, truncate
+                            messages.append(word[:max_length])
+                            current_message = word[max_length:] + ' '
+                    else:
+                        current_message = test_word
+            else:
+                current_message = line + '\n'
+        else:
+            current_message = test_message
+    
+    # Add remaining message
+    if current_message:
+        messages.append(current_message.strip())
+    
+    return messages
+
 def send_message_to_channel(message):
-    """Send message to all channels in the list"""
+    """Send message to all channels in the list (splits if too long)"""
     channels = CHANNELS.copy()
     
     if not channels:
         print("[ERROR] No channels configured!")
         return False
     
+    # Split message if too long
+    message_parts = split_message(message, max_length=4000)
+    
     success_count = 0
     failed_channels = []
     
     for channel in channels:
-        sent = False
-        for chat_id in [channel]:
+        channel_success = True
+        for part_idx, message_part in enumerate(message_parts):
             try:
                 url = f"{TELEGRAM_API}/sendMessage"
                 payload = {
-                    "chat_id": chat_id,
-                    "text": message,
+                    "chat_id": channel,
+                    "text": message_part,
                     "parse_mode": "HTML"
                 }
                 response = requests.post(url, json=payload, timeout=10)
@@ -227,35 +321,39 @@ def send_message_to_channel(message):
                 
                 if result.get("ok"):
                     msg_id = result["result"].get("message_id", "N/A")
-                    print(f"[SUCCESS] Message sent to {channel} (ID: {msg_id}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    if len(message_parts) > 1:
+                        print(f"[SUCCESS] Message part {part_idx + 1}/{len(message_parts)} sent to {channel} (ID: {msg_id}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    else:
+                        print(f"[SUCCESS] Message sent to {channel} (ID: {msg_id}) at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     sys.stdout.flush()
-                    success_count += 1
-                    sent = True
-                    break
+                    # Small delay between parts
+                    if part_idx < len(message_parts) - 1:
+                        time.sleep(0.5)
                 else:
                     error_code = result.get("error_code", "Unknown")
                     error_desc = result.get("description", "Unknown error")
-                    
-                    if chat_id == channel_ids[-1]:
-                        print(f"[ERROR] Failed to send to {channel}: {error_code} - {error_desc}")
-                        sys.stdout.flush()
-                        failed_channels.append(f"{channel} ({error_desc})")
-                    
-                    continue
+                    print(f"[ERROR] Failed to send part {part_idx + 1} to {channel}: {error_code} - {error_desc}")
+                    sys.stdout.flush()
+                    channel_success = False
+                    failed_channels.append(f"{channel} ({error_desc})")
+                    break
                     
             except Exception as e:
-                if chat_id == channel_ids[-1]:
-                    print(f"[ERROR] Error sending to {channel}: {e}")
-                    sys.stdout.flush()
-                    failed_channels.append(f"{channel} (Error: {e})")
-                continue
+                print(f"[ERROR] Error sending part {part_idx + 1} to {channel}: {e}")
+                sys.stdout.flush()
+                channel_success = False
+                failed_channels.append(f"{channel} (Error: {e})")
+                break
         
-        if not sent:
-            failed_channels.append(channel)
+        if channel_success:
+            success_count += 1
     
     # Summary
     if success_count > 0:
-        print(f"[INFO] Successfully sent to {success_count}/{len(channels)} channel(s)")
+        if len(message_parts) > 1:
+            print(f"[INFO] Successfully sent {len(message_parts)} message part(s) to {success_count}/{len(channels)} channel(s)")
+        else:
+            print(f"[INFO] Successfully sent to {success_count}/{len(channels)} channel(s)")
         if failed_channels:
             print(f"[WARNING] Failed channels: {', '.join(failed_channels)}")
         sys.stdout.flush()
@@ -264,6 +362,72 @@ def send_message_to_channel(message):
         print(f"[ERROR] Failed to send to all channels!")
         sys.stdout.flush()
         return False
+
+def format_top_crypto_message(crypto_data, coin_count=25):
+    """Format top cryptocurrencies price message (returns list if needs splitting)"""
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    current_time_display = datetime.now().strftime("%I:%M %p")
+    
+    if not crypto_data or len(crypto_data) == 0:
+        return None
+    
+    # More compact format to fit more coins
+    header = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>📊 TOP {coin_count} CRYPTOCURRENCY PRICES</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+"""
+    
+    footer = f"""
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>🕐 Updated:</b> {current_time}
+<b>⏰ Time:</b> {current_time_display}
+
+<b>#Crypto</b> <b>#Cryptocurrency</b> <b>#CryptoPrice</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+    
+    # Build coin entries
+    coin_entries = []
+    for idx, crypto in enumerate(crypto_data[:coin_count], 1):
+        symbol = crypto.get("symbol", "").upper()
+        name = crypto.get("name", "Unknown")
+        price = crypto.get("current_price", 0)
+        change_24h = crypto.get("price_change_percentage_24h", 0)
+        market_cap_rank = crypto.get("market_cap_rank", idx)
+        
+        # Format price
+        if price >= 1:
+            price_str = f"${price:,.2f}"
+        elif price >= 0.01:
+            price_str = f"${price:.4f}"
+        else:
+            price_str = f"${price:.8f}"
+        
+        # Format change
+        if change_24h:
+            if change_24h > 0:
+                change_emoji = "🟢"
+                change_str = f"+{change_24h:.2f}%"
+            else:
+                change_emoji = "🔴"
+                change_str = f"{change_24h:.2f}%"
+        else:
+            change_emoji = "⚪"
+            change_str = "N/A"
+        
+        # Format rank - more compact
+        rank_str = f"#{market_cap_rank}" if market_cap_rank else f"#{idx}"
+        
+        # Compact format: #1 BTC - Bitcoin | $67,234.56 🟢 +2.34%
+        coin_entry = f"<b>{rank_str} {symbol}</b> - {name} | <code>{price_str}</code> {change_emoji} <code>{change_str}</code>\n"
+        coin_entries.append(coin_entry)
+    
+    # Combine all parts
+    full_message = header + ''.join(coin_entries) + footer
+    
+    return full_message.strip()
 
 def format_price_message(price, change_24h):
     """Format the price message with emoji and formatting"""
@@ -363,7 +527,7 @@ def is_admin(user_id):
 
 def handle_command(update):
     """Handle bot commands"""
-    global bot_running, post_interval
+    global bot_running, post_interval, crypto_count
     
     if "message" not in update:
         return
@@ -425,6 +589,10 @@ def handle_command(update):
 /interval 30s - Set posting interval (seconds)
   Example: /interval 30s (30 seconds)
 /interval - Show current interval
+/coins 25 - Set number of coins to post
+  Example: /coins 25 (post top 25 coins)
+  Range: 1-100 coins
+/coins - Show current coin count
 
 <b>Information:</b>
 /info - Get bot information
@@ -436,6 +604,7 @@ def handle_command(update):
 <b>⚙️ CURRENT SETTINGS:</b>
 
 Posting Interval: {interval_display} ({post_interval} seconds)
+Coin Count: {crypto_count} coins
 Bot Status: {'Running ✅' if bot_running else 'Stopped ⏸️'}
 Channels ({len(CHANNELS)}):
 {channels_list}
@@ -486,6 +655,12 @@ Channels ({len(CHANNELS)}):
 /interval 90s - Set to 90 seconds
 /interval - Show current interval
 
+<b>🪙 Coin Settings:</b>
+/coins 25 - Set number of coins (1-100)
+/coins 10 - Post top 10 coins
+/coins 50 - Post top 50 coins
+/coins - Show current count
+
 <b>ℹ️ Information:</b>
 /info - Bot information
 /getmyid - Get your User ID
@@ -494,6 +669,7 @@ Channels ({len(CHANNELS)}):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 <b>Current Interval:</b> {interval_display} ({post_interval}s)
+<b>Coin Count:</b> {crypto_count} coins
 <b>Channels:</b> {len(CHANNELS)} channel(s)
 <b>Bot Status:</b> {'Running ✅' if bot_running else 'Stopped ⏸️'}
 
@@ -529,6 +705,7 @@ Channels ({len(CHANNELS)}):
             status_text += f"\nPosting Interval: {minutes} min {seconds} sec ({post_interval}s)"
         else:
             status_text += f"\nPosting Interval: {minutes} minute(s) ({post_interval}s)"
+        status_text += f"\nCoin Count: {crypto_count} coins"
         send_message_to_user(chat_id, status_text)
         
     elif command == "/price":
@@ -638,6 +815,24 @@ If you see this message, the bot is working correctly!
             
             send_message_to_user(chat_id, f"📊 <b>Current Interval:</b> {interval_display}\n\n<b>To change:</b>\n/interval 5 - 5 minutes\n/interval 5m - 5 minutes\n/interval 30s - 30 seconds\n/interval 90s - 90 seconds")
             
+    elif command == "/coins":
+        # Get coin count from command: /coins 25
+        parts = text.split()
+        if len(parts) > 1:
+            try:
+                count = int(parts[1])
+                if count < 1:
+                    send_message_to_user(chat_id, "❌ Coin count must be at least 1")
+                elif count > 100:
+                    send_message_to_user(chat_id, "❌ Coin count cannot be more than 100")
+                else:
+                    crypto_count = count
+                    send_message_to_user(chat_id, f"✅ Coin count set to {count}\nBot will now post top {count} cryptocurrency prices")
+            except ValueError:
+                send_message_to_user(chat_id, "❌ Invalid number format.\n\nExamples:\n/coins 25 - Post top 25 coins\n/coins 10 - Post top 10 coins\n/coins 50 - Post top 50 coins")
+        else:
+            send_message_to_user(chat_id, f"📊 <b>Current Coin Count:</b> {crypto_count} coins\n\n<b>To change:</b>\n/coins 10 - Post top 10 coins\n/coins 25 - Post top 25 coins\n/coins 50 - Post top 50 coins\n\n<b>Range:</b> 1-100 coins")
+            
     elif command == "/addchannel":
         # Add channel: /addchannel @channelname
         parts = text.split()
@@ -707,10 +902,14 @@ If you see this message, the bot is working correctly!
             
     elif command == "/current":
         channels_list = "\n".join([f"• {ch}" for ch in CHANNELS]) if CHANNELS else "No channels"
+        minutes = post_interval // 60
+        seconds = post_interval % 60
+        interval_display = f"{minutes} min {seconds} sec" if seconds > 0 else f"{minutes} minute(s)"
         status_text = f"""
 ⚙️ <b>Current Bot Settings</b>
 
-Posting Interval: {post_interval // 60} minute(s) ({post_interval} seconds)
+Posting Interval: {interval_display} ({post_interval} seconds)
+Coin Count: {crypto_count} coins
 Bot Status: {'Running ✅' if bot_running else 'Stopped ⏸️'}
 Channels ({len(CHANNELS)}):
 {channels_list}
@@ -718,6 +917,7 @@ Channels ({len(CHANNELS)}):
 <b>Commands:</b>
 /interval 5m - Set interval to 5 minutes
 /interval 30s - Set interval to 30 seconds
+/coins 25 - Set coin count (1-100)
 /addchannel @name - Add channel
 /removechannel @name - Remove channel
 /channels - List all channels
@@ -781,6 +981,7 @@ def run_bot():
         print(f"Posting interval: {minutes} min {seconds} sec ({post_interval} seconds)")
     else:
         print(f"Posting interval: {minutes} minute(s) ({post_interval} seconds)")
+    print(f"Coin count: {crypto_count} coins")
     if ADMIN_USER_IDS:
         print(f"Admin Users: {len(ADMIN_USER_IDS)}")
     else:
@@ -831,26 +1032,22 @@ def run_bot():
             
             # Post price if bot is running and interval has passed
             if bot_running and (current_time - last_price_post) >= post_interval:
-                # Get BTC price with retry logic
-                price, change_24h = get_btc_price()
+                # Get top crypto prices (number set by admin)
+                crypto_data = get_top_crypto_prices(limit=crypto_count)
                 
-                if price:
+                if crypto_data:
                     # Format and send message
-                    message = format_price_message(price, change_24h)
-                    if send_message_to_channel(message):
+                    message = format_top_crypto_message(crypto_data, coin_count=crypto_count)
+                    if message and send_message_to_channel(message):
                         last_price_post = current_time
-                        print(f"[SUCCESS] Price posted at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        print(f"[SUCCESS] Top {crypto_count} crypto prices posted at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                         sys.stdout.flush()
                     else:
                         print(f"[WARNING] Failed to send message at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                         sys.stdout.flush()
-                        # Don't update last_price_post, will retry on next cycle
                 else:
-                    # Only log if we don't have cached price
-                    if not last_successful_price:
-                        print(f"[WARNING] Failed to fetch BTC price at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                        sys.stdout.flush()
-                    # Don't update last_price_post if we failed completely
+                    print(f"[WARNING] Failed to fetch crypto prices at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    sys.stdout.flush()
                     # Wait a bit before next attempt to avoid API spam
                     if api_fail_count > 0:
                         wait_time = min(api_fail_count * 5, 30)  # Max 30 seconds
